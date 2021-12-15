@@ -1,0 +1,17 @@
+{
+  "name": "wallet",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "../../node_modules/.bin/ts-node index.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@node-lightning/bitcoin": "file:../../packages/bitcoin",
+    "@node-lightning/bitcoind": "file:../../packages/bitcoind",
+    "@node-lightning/core": "file:../../packages/core"
+  }
+}
