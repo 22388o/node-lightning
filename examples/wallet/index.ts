@@ -118,7 +118,6 @@ class WalletAccount {
         const outpoints: Map<OutPoint, InPoint> = new Map();
 
         while (height <= (await this._getBestHeight())) {
-            console.log(height);
             this._expandAddressWindow(key, foundAddresses, scanAddresses, addressWindow);
 
             const hash = await bitcoind.getBlockHash(height);
@@ -151,17 +150,22 @@ class WalletAccount {
         if (scanAddresses.size >= foundAddresses.size + addressWindow) return;
 
         let maxIndex = -1;
-        for (const address of foundAddresses.values()) {
-            if (address.index > maxIndex) {
-                maxIndex = address.index;
+        for (const index of scanAddresses.values()) {
+            if (index > maxIndex) {
+                maxIndex = index;
             }
         }
-        const startIndex = maxIndex + 1;
 
-        for (let i = startIndex; i < startIndex + addressWindow; i++) {
+        const used = foundAddresses.size;
+        const startIndex = maxIndex + 1;
+        const endIndex = used + addressWindow;
+
+        for (let i = startIndex; i < endIndex; i++) {
             const prvkey = key.derive(i);
             scanAddresses.set(prvkey.toAddress(), i);
         }
+
+        console.log("added", endIndex - startIndex, "addresses to scan list");
     }
 
     protected _recoverBlock(
