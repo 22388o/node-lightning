@@ -92,8 +92,23 @@ export class BitcoindClient extends EventEmitter {
         return this._jsonrpc<BlockSummary>("getblock", [hash, 1]);
     }
 
+    /**
+     * Get a block including the transaction data using the `getblock`
+     * RPC method.
+     * @param hash
+     * @returns
+     */
     public async getBlock(hash: string): Promise<Block> {
         return this._jsonrpc<Block>("getblock", [hash, 2]);
+    }
+
+    /**
+     * Gets the block header by calling the `getblockheader` RPC method
+     * @param hash
+     * @returns
+     */
+    public async getBlockHeader(hash: string): Promise<BlockHeader> {
+        return this._jsonrpc<BlockHeader>("getblockheader", [hash]);
     }
 
     /**

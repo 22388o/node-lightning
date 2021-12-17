@@ -12,7 +12,7 @@ export type BlockSummary = {
     mediantime: number;
     nonce: number;
     bits: string;
-    difficulty: string;
+    difficulty: number;
     chainwork: string;
     nTx: number;
     previousblockhash: string;
