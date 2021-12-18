@@ -41,6 +41,23 @@ class Wallet {
         return await this.bip84Account.recover(bitcoind, height, addressWindow);
     }
 
+    public async recover2(bitcoind: BitcoindClient) {
+        const filter = new BitcoindBlockScanner();
+        this.bip32Account.recover2(filter);
+        this.bip84Account.recover2(filter);
+
+        let bestHash = await bitcoind.getBestBlockHash();
+        let bestHeader = await bitcoind.getHeader(bestHash);
+
+        let startHeight = 1;
+        let endHeight = bestHeader.height;
+
+        while (true) {
+            startHeight = await filter.scan(startHeight, endHeight);
+            if (!startHeight) break;
+        }
+    }
+
     public onBlockConnected(header: BlockHeader, txs: Transaction[]) {
         this.bip32Account.onBlockConnected(header, txs);
         this.bip84Account.onBlockConnected(header, txs);
@@ -64,6 +81,119 @@ class Wallet {
 type Address = string;
 type OutPoint = string;
 type InPoint = string;
+
+export type BlockScanReceiveEvent = {
+    address: string;
+    outpoint: string;
+};
+
+export type BlockScanSpendEvent = {
+    outpoint: string;
+    inpoint: string;
+};
+
+export type BlockReceiveHandler = (event: BlockScanReceiveEvent) => boolean;
+export type BlockSpendHandler = (event: BlockScanSpendEvent) => boolean;
+
+export interface IBlockScanner {
+    scan(startHeight: number, endHeight: number): Promise<number>;
+    registerHandlers(
+        rhandler: BlockReceiveHandler,
+        shandler: BlockSpendHandler,
+        scan: () => void,
+        complete: () => void,
+    ): void;
+}
+
+export class BitcoindBlockScanner implements IBlockScanner {
+    protected _receiveHandlers: BlockReceiveHandler[];
+    protected _spendHandlers: BlockSpendHandler[];
+    protected _completes: (() => void)[];
+    protected _scans: (() => void)[];
+
+    constructor() {
+        this._receiveHandlers = [];
+        this._spendHandlers = [];
+        this._completes = [];
+        this._scans = [];
+    }
+
+    public async scan(startHeight: number, endHeight: number): Promise<number> {
+        for (const sscan of this._scans) {
+            sscan();
+        }
+
+        for (let height = startHeight; height <= endHeight; height++) {
+            const hash = await bitcoind.getBlockHash(height);
+            const block = await bitcoind.getBlock(hash);
+            const txs = block.tx;
+
+            if (!this._scanBlock(txs)) {
+                return height;
+            }
+        }
+
+        for (const complete of this._completes) {
+            complete();
+        }
+    }
+
+    public registerHandlers(
+        rhandler: BlockReceiveHandler,
+        shandler: BlockSpendHandler,
+        scan: () => void,
+        complete: () => void,
+    ): void {
+        this._receiveHandlers.push(rhandler);
+        this._spendHandlers.push(shandler);
+        this._scans.push(scan);
+        this._completes.push(complete);
+    }
+
+    protected _scanBlock(txs: Transaction[]): boolean {
+        // start scanning all txs
+        for (const tx of txs) {
+            // look for spends in transaction inputs
+            for (let n = 0; n < tx.vin.length; n++) {
+                const vin = tx.vin[n];
+
+                // ignore coinbase
+                if (!vin.txid) continue;
+
+                const event = {
+                    outpoint: `${vin.txid}:${vin.vout}`,
+                    inpoint: `${tx.txid}:${n}`,
+                };
+
+                for (let handler of this._spendHandlers) {
+                    if (!handler(event)) return false;
+                }
+            }
+
+            // look for recieves in transaction outputs
+            for (let n = 0; n < tx.vout.length; n++) {
+                const vout = tx.vout[n];
+                const outpoint = `${tx.txid}:${n}`;
+
+                // if no addresses, skip
+                if (!vout.scriptPubKey.addresses) continue;
+
+                // iterate all addresses
+                for (const address of vout.scriptPubKey.addresses) {
+                    const event = {
+                        address,
+                        outpoint,
+                    };
+                    for (const handler of this._receiveHandlers) {
+                        if (!handler(event)) return false;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+}
 
 class WalletAccount {
     protected external: HdPrivateKey;
@@ -98,6 +228,67 @@ class WalletAccount {
         this.addressTxs.set(address, []);
         this.nextInternal++;
         return address;
+    }
+
+    public async recover2(filter: IBlockScanner) {
+        const key = this.account.derive(0);
+        const foundAddresses: Map<Address, { index: number; tx: Set<string> }> = new Map();
+        const scanAddresses: Map<Address, number> = new Map();
+        const outpoints: Map<OutPoint, InPoint> = new Map();
+
+        const expandAddressWindow = this._expandAddressWindow;
+
+        function onScan() {
+            expandAddressWindow(key, foundAddresses, scanAddresses, 2000);
+        }
+
+        function handleReceive(e: BlockScanReceiveEvent): boolean {
+            const { address, outpoint } = e;
+
+            if (!scanAddresses.has(address)) return true;
+
+            if (!foundAddresses.has(address)) {
+                foundAddresses.set(address, {
+                    index: scanAddresses.get(address),
+                    tx: new Set(),
+                });
+            }
+
+            // get the found address record
+            const record = foundAddresses.get(address);
+
+            // ignore if we previously processed this. This will
+            // happen during a reprocessing of a block where we
+            // need to expand the search parameters
+            if (record.tx.has(outpoint)) return true;
+
+            // add the outpoint to the address
+            record.tx.add(outpoint);
+
+            // add the outpoint as a watched outpoint
+            outpoints.set(outpoint, null);
+
+            return foundAddresses.size < scanAddresses.size;
+        }
+
+        function handleSpend(e: BlockScanSpendEvent): boolean {
+            const { outpoint, inpoint } = e;
+
+            // not currently watching this outpoint
+            if (!outpoints.has(outpoint)) return true;
+
+            // mark the watched outpoint as spent with this input
+            outpoints.set(outpoint, inpoint);
+
+            return true;
+        }
+
+        function onComplete() {
+            console.log(foundAddresses);
+            console.log(outpoints);
+        }
+
+        filter.registerHandlers(handleReceive, handleSpend, onScan, onComplete);
     }
 
     /**
@@ -297,10 +488,12 @@ const seed = Mnemonic.phraseToSeed("abandon abandon abandon abandon abandon aban
 
 const wallet = new Wallet(seed, network, 0);
 
-console.log(wallet.getP2wpkhAddress());
-console.log(wallet.getP2wpkhAddress());
+// console.log(wallet.getP2wpkhAddress());
+// console.log(wallet.getP2wpkhAddress());
 
-wallet.recover(bitcoind).catch(console.error);
+// wallet.recover(bitcoind).catch(console.error);
+
+wallet.recover2(bitcoind).catch(console.error);
 
 // async function sync() {
 //     let height = 0;
