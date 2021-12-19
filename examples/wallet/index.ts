@@ -1,5 +1,6 @@
 import { Mnemonic, HdPrivateKey, Network } from "@node-lightning/bitcoin";
 import { BitcoindClient, BlockHeader, Transaction } from "@node-lightning/bitcoind";
+import { EventEmitter } from "stream";
 
 const bitcoind = new BitcoindClient({
     port: 18443,
@@ -15,7 +16,13 @@ const bitcoind = new BitcoindClient({
  * - monitor for outputs
  * - created unsigned txes
  * - sign txes
- * - broadcast txes > no
+ * - broadcast txes
+ * - rescan to find controlled addresses
+ *      > depends on the implementation and access to indexes
+ *      > this implementation can use an abstraction to control rescan
+ *
+ * - should use abstraction the provides parsed block / transaction
+ *   objects for common methods
  */
 class Wallet {
     public bip32Account: WalletAccount;
@@ -52,7 +59,10 @@ class Wallet {
         let startHeight = 1;
         let endHeight = bestHeader.height;
 
-        while (true) {
+        let complete = false;
+        filter.on("complete", () => (complete = true));
+
+        while (!complete) {
             startHeight = await filter.scan(startHeight, endHeight);
             if (!startHeight) break;
         }
@@ -92,62 +102,81 @@ export type BlockScanSpendEvent = {
     inpoint: string;
 };
 
-export type BlockReceiveHandler = (event: BlockScanReceiveEvent) => boolean;
-export type BlockSpendHandler = (event: BlockScanSpendEvent) => boolean;
+export type BlockScannerEvent = {
+    receive: (event: BlockScanReceiveEvent) => boolean;
+    spend: (event: BlockScanSpendEvent) => boolean;
+    start: () => void;
+    block: (height: number) => void;
+    complete: () => void;
+};
 
 export interface IBlockScanner {
     scan(startHeight: number, endHeight: number): Promise<number>;
-    registerHandlers(
-        rhandler: BlockReceiveHandler,
-        shandler: BlockSpendHandler,
-        scan: () => void,
-        complete: () => void,
-    ): void;
+    cancel(): void;
+
+    on<U extends keyof BlockScannerEvent>(event: U, listener: BlockScannerEvent[U]): this;
+    off<U extends keyof BlockScannerEvent>(event: U, listener: BlockScannerEvent[U]): this;
+    emit<U extends keyof BlockScannerEvent>(
+        event: U,
+        ...args: Parameters<BlockScannerEvent[U]>
+    ): boolean;
 }
 
-export class BitcoindBlockScanner implements IBlockScanner {
-    protected _receiveHandlers: BlockReceiveHandler[];
-    protected _spendHandlers: BlockSpendHandler[];
-    protected _completes: (() => void)[];
-    protected _scans: (() => void)[];
+// export declare interface BlockScanner {
+//     on<U extends keyof BlockScannerEvent>(event: U, listener: BlockScannerEvent[U]): this;
+//     off<U extends keyof BlockScannerEvent>(event: U, listener: BlockScannerEvent[U]): this;
+//     emit<U extends keyof BlockScannerEvent>(
+//         event: U,
+//         ...args: Parameters<BlockScannerEvent[U]>
+//     ): boolean;
+// }
 
-    constructor() {
-        this._receiveHandlers = [];
-        this._spendHandlers = [];
-        this._completes = [];
-        this._scans = [];
+export enum BlockScannerState {
+    Pending,
+    Scanning,
+    Canceled,
+    Complete,
+}
+
+export abstract class BlockScanner extends EventEmitter implements IBlockScanner {
+    private _state: BlockScannerState = BlockScannerState.Pending;
+
+    public get state() {
+        return this._state;
     }
 
     public async scan(startHeight: number, endHeight: number): Promise<number> {
-        for (const sscan of this._scans) {
-            sscan();
-        }
+        this._state = BlockScannerState.Scanning;
+        this.emit("start");
 
+        const result = await this._scanRange(startHeight, endHeight);
+
+        this._state = BlockScannerState.Complete;
+        this.emit("complete");
+
+        return result;
+    }
+
+    public cancel() {
+        this._state = BlockScannerState.Canceled;
+    }
+
+    protected abstract _scanRange(startHeight: number, endHeight: number): Promise<number>;
+}
+
+export class BitcoindBlockScanner extends BlockScanner {
+    public async _scanRange(startHeight: number, endHeight: number): Promise<number> {
         for (let height = startHeight; height <= endHeight; height++) {
+            this.emit("block", height);
             const hash = await bitcoind.getBlockHash(height);
             const block = await bitcoind.getBlock(hash);
             const txs = block.tx;
 
-            if (!this._scanBlock(txs)) {
+            this._scanBlock(txs);
+            if (this.state === BlockScannerState.Canceled) {
                 return height;
             }
         }
-
-        for (const complete of this._completes) {
-            complete();
-        }
-    }
-
-    public registerHandlers(
-        rhandler: BlockReceiveHandler,
-        shandler: BlockSpendHandler,
-        scan: () => void,
-        complete: () => void,
-    ): void {
-        this._receiveHandlers.push(rhandler);
-        this._spendHandlers.push(shandler);
-        this._scans.push(scan);
-        this._completes.push(complete);
     }
 
     protected _scanBlock(txs: Transaction[]): boolean {
@@ -160,14 +189,10 @@ export class BitcoindBlockScanner implements IBlockScanner {
                 // ignore coinbase
                 if (!vin.txid) continue;
 
-                const event = {
+                this.emit("spend", {
                     outpoint: `${vin.txid}:${vin.vout}`,
                     inpoint: `${tx.txid}:${n}`,
-                };
-
-                for (let handler of this._spendHandlers) {
-                    if (!handler(event)) return false;
-                }
+                });
             }
 
             // look for recieves in transaction outputs
@@ -180,13 +205,10 @@ export class BitcoindBlockScanner implements IBlockScanner {
 
                 // iterate all addresses
                 for (const address of vout.scriptPubKey.addresses) {
-                    const event = {
+                    this.emit("receive", {
                         address,
                         outpoint,
-                    };
-                    for (const handler of this._receiveHandlers) {
-                        if (!handler(event)) return false;
-                    }
+                    });
                 }
             }
         }
@@ -236,13 +258,11 @@ class WalletAccount {
         const scanAddresses: Map<Address, number> = new Map();
         const outpoints: Map<OutPoint, InPoint> = new Map();
 
-        const expandAddressWindow = this._expandAddressWindow;
+        filter.on("start", () => {
+            this._expandAddressWindow(key, foundAddresses, scanAddresses, 2000);
+        });
 
-        function onScan() {
-            expandAddressWindow(key, foundAddresses, scanAddresses, 2000);
-        }
-
-        function handleReceive(e: BlockScanReceiveEvent): boolean {
+        filter.on("receive", (e: BlockScanReceiveEvent) => {
             const { address, outpoint } = e;
 
             if (!scanAddresses.has(address)) return true;
@@ -269,9 +289,9 @@ class WalletAccount {
             outpoints.set(outpoint, null);
 
             return foundAddresses.size < scanAddresses.size;
-        }
+        });
 
-        function handleSpend(e: BlockScanSpendEvent): boolean {
+        filter.on("spend", (e: BlockScanSpendEvent) => {
             const { outpoint, inpoint } = e;
 
             // not currently watching this outpoint
@@ -279,16 +299,12 @@ class WalletAccount {
 
             // mark the watched outpoint as spent with this input
             outpoints.set(outpoint, inpoint);
+        });
 
-            return true;
-        }
-
-        function onComplete() {
+        filter.on("complete", () => {
             console.log(foundAddresses);
             console.log(outpoints);
-        }
-
-        filter.registerHandlers(handleReceive, handleSpend, onScan, onComplete);
+        });
     }
 
     /**
