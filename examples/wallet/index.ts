@@ -1,6 +1,7 @@
 import { Mnemonic, HdPrivateKey, Network } from "@node-lightning/bitcoin";
 import { BitcoindClient, BlockHeader, Transaction } from "@node-lightning/bitcoind";
 import { BitcoindBlockScanner } from "./BitcoindBlockScanner";
+import { BitcoindBip32NodeScanner } from "./BitcoindSingleScanner";
 import { BlockScanReceiveEvent, BlockScanSpendEvent, IBlockScanner } from "./BlockScanner";
 
 const bitcoind = new BitcoindClient({
@@ -39,14 +40,6 @@ class Wallet {
 
         const bip84AccountKey = HdPrivateKey.fromPath(`m/84'/${coinType}/0'`, seed, network);
         this.bip84Account = new WalletAccount(bip84AccountKey);
-    }
-
-    public async recover(
-        bitcoind: BitcoindClient,
-        height: number = 1,
-        addressWindow: number = 2000,
-    ) {
-        return await this.bip84Account.recover(bitcoind, height, addressWindow);
     }
 
     public async recover2(bitcoind: BitcoindClient) {
@@ -183,47 +176,6 @@ class WalletAccount {
         });
     }
 
-    /**
-     * Rescan algorithm
-     * 1) expand address window to look for
-     * 2) begin scanning at block height
-     * 3) add found addresses + outpoints to wallet
-     * 4) go back to step 1. incrementing block if window wasn't breached, otherwise rescan block
-     */
-    public async recover(
-        bitcoind: BitcoindClient,
-        height: number = 1,
-        addressWindow: number = 2000,
-    ) {
-        const key = this.account.derive(0);
-        const foundAddresses: Map<Address, { index: number; tx: Set<string> }> = new Map();
-        const scanAddresses: Map<Address, number> = new Map();
-        const outpoints: Map<OutPoint, InPoint> = new Map();
-
-        while (height <= (await this._getBestHeight())) {
-            this._expandAddressWindow(key, foundAddresses, scanAddresses, addressWindow);
-
-            const hash = await bitcoind.getBlockHash(height);
-            const block = await bitcoind.getBlock(hash);
-            const txs = block.tx;
-
-            this._recoverBlock(txs, outpoints, foundAddresses, scanAddresses);
-
-            if (foundAddresses.size < scanAddresses.size) {
-                height += 1;
-            }
-        }
-
-        console.log(foundAddresses);
-        console.log(outpoints);
-    }
-
-    protected async _getBestHeight(): Promise<number> {
-        let bestHash = await bitcoind.getBestBlockHash();
-        let bestHeader = await bitcoind.getHeader(bestHash);
-        return bestHeader.height;
-    }
-
     protected _expandAddressWindow(
         key: HdPrivateKey,
         foundAddresses: Map<Address, { index: number; tx: Set<string> }>,
@@ -249,75 +201,6 @@ class WalletAccount {
         }
 
         console.log("added", endIndex - startIndex, "addresses to scan list");
-    }
-
-    protected _recoverBlock(
-        txs: Transaction[],
-        outpoints: Map<OutPoint, InPoint>,
-        foundAddresses: Map<Address, { index: number; tx: Set<string> }>,
-        scanAddresses: Map<Address, number>,
-    ) {
-        // start scanning all txs
-        for (const tx of txs) {
-            // look for spends in transaction inputs
-            for (let n = 0; n < tx.vin.length; n++) {
-                const vin = tx.vin[n];
-
-                // ignore coinbase
-                if (!vin.txid) continue;
-
-                const outpoint = `${vin.txid}:${vin.vout}`;
-                const inpoint = `${tx.txid}:${n}`;
-
-                // not currently watching this outpoint
-                if (!outpoints.has(outpoint)) continue;
-
-                // mark the watched outpoint as spent with this input
-                outpoints.set(outpoint, inpoint);
-
-                console.log("spent", outpoint, "with", inpoint);
-            }
-
-            // look for recieves in transaction outputs
-            for (let n = 0; n < tx.vout.length; n++) {
-                const vout = tx.vout[n];
-                const outpoint = `${tx.txid}:${n}`;
-
-                // if no addresses, skip
-                if (!vout.scriptPubKey.addresses) continue;
-
-                // iterate all addresses
-                for (const address of vout.scriptPubKey.addresses) {
-                    // skip if we don't care about this one
-                    if (!scanAddresses.has(address)) continue;
-
-                    // first time seeing this address we construt a new
-                    // found address record
-                    if (!foundAddresses.has(address)) {
-                        foundAddresses.set(address, {
-                            index: scanAddresses.get(address),
-                            tx: new Set(),
-                        });
-                    }
-
-                    // get the found address record
-                    const record = foundAddresses.get(address);
-
-                    // ignore if we previously processed this. This will
-                    // happen during a reprocessing of a block where we
-                    // need to expand the search parameters
-                    if (record.tx.has(outpoint)) continue;
-
-                    // add the outpoint to the address
-                    record.tx.add(outpoint);
-
-                    // add the outpoint as a watched outpoint
-                    outpoints.set(outpoint, null);
-
-                    console.log("received payment", address, outpoint);
-                }
-            }
-        }
     }
 
     public onBlockConnected(block: BlockHeader, txs: Transaction[]) {
@@ -383,9 +266,10 @@ const wallet = new Wallet(seed, network, 0);
 // console.log(wallet.getP2wpkhAddress());
 // console.log(wallet.getP2wpkhAddress());
 
-// wallet.recover(bitcoind).catch(console.error);
+const nodeScanner = new BitcoindBip32NodeScanner(bitcoind, wallet.bip84Account.account);
+nodeScanner.scan().catch(console.error);
 
-wallet.recover2(bitcoind).catch(console.error);
+// wallet.recover2(bitcoind).catch(console.error);
 
 // async function sync() {
 //     let height = 0;
