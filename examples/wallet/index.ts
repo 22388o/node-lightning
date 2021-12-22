@@ -1,6 +1,7 @@
 import { Mnemonic, HdPrivateKey, Network } from "@node-lightning/bitcoin";
 import { BitcoindClient, BlockHeader, Transaction } from "@node-lightning/bitcoind";
-import { EventEmitter } from "stream";
+import { BitcoindBlockScanner } from "./BitcoindBlockScanner";
+import { BlockScanReceiveEvent, BlockScanSpendEvent, IBlockScanner } from "./BlockScanner";
 
 const bitcoind = new BitcoindClient({
     port: 18443,
@@ -49,7 +50,7 @@ class Wallet {
     }
 
     public async recover2(bitcoind: BitcoindClient) {
-        const filter = new BitcoindBlockScanner();
+        const filter = new BitcoindBlockScanner(bitcoind);
         this.bip32Account.recover2(filter);
         this.bip84Account.recover2(filter);
 
@@ -91,131 +92,6 @@ class Wallet {
 type Address = string;
 type OutPoint = string;
 type InPoint = string;
-
-export type BlockScanReceiveEvent = {
-    address: string;
-    outpoint: string;
-};
-
-export type BlockScanSpendEvent = {
-    outpoint: string;
-    inpoint: string;
-};
-
-export type BlockScannerEvent = {
-    receive: (event: BlockScanReceiveEvent) => boolean;
-    spend: (event: BlockScanSpendEvent) => boolean;
-    start: () => void;
-    block: (height: number) => void;
-    complete: () => void;
-};
-
-export interface IBlockScanner {
-    scan(startHeight: number, endHeight: number): Promise<number>;
-    cancel(): void;
-
-    on<U extends keyof BlockScannerEvent>(event: U, listener: BlockScannerEvent[U]): this;
-    off<U extends keyof BlockScannerEvent>(event: U, listener: BlockScannerEvent[U]): this;
-    emit<U extends keyof BlockScannerEvent>(
-        event: U,
-        ...args: Parameters<BlockScannerEvent[U]>
-    ): boolean;
-}
-
-// export declare interface BlockScanner {
-//     on<U extends keyof BlockScannerEvent>(event: U, listener: BlockScannerEvent[U]): this;
-//     off<U extends keyof BlockScannerEvent>(event: U, listener: BlockScannerEvent[U]): this;
-//     emit<U extends keyof BlockScannerEvent>(
-//         event: U,
-//         ...args: Parameters<BlockScannerEvent[U]>
-//     ): boolean;
-// }
-
-export enum BlockScannerState {
-    Pending,
-    Scanning,
-    Canceled,
-    Complete,
-}
-
-export abstract class BlockScanner extends EventEmitter implements IBlockScanner {
-    private _state: BlockScannerState = BlockScannerState.Pending;
-
-    public get state() {
-        return this._state;
-    }
-
-    public async scan(startHeight: number, endHeight: number): Promise<number> {
-        this._state = BlockScannerState.Scanning;
-        this.emit("start");
-
-        const result = await this._scanRange(startHeight, endHeight);
-
-        this._state = BlockScannerState.Complete;
-        this.emit("complete");
-
-        return result;
-    }
-
-    public cancel() {
-        this._state = BlockScannerState.Canceled;
-    }
-
-    protected abstract _scanRange(startHeight: number, endHeight: number): Promise<number>;
-}
-
-export class BitcoindBlockScanner extends BlockScanner {
-    public async _scanRange(startHeight: number, endHeight: number): Promise<number> {
-        for (let height = startHeight; height <= endHeight; height++) {
-            this.emit("block", height);
-            const hash = await bitcoind.getBlockHash(height);
-            const block = await bitcoind.getBlock(hash);
-            const txs = block.tx;
-
-            this._scanBlock(txs);
-            if (this.state === BlockScannerState.Canceled) {
-                return height;
-            }
-        }
-    }
-
-    protected _scanBlock(txs: Transaction[]): boolean {
-        // start scanning all txs
-        for (const tx of txs) {
-            // look for spends in transaction inputs
-            for (let n = 0; n < tx.vin.length; n++) {
-                const vin = tx.vin[n];
-
-                // ignore coinbase
-                if (!vin.txid) continue;
-
-                this.emit("spend", {
-                    outpoint: `${vin.txid}:${vin.vout}`,
-                    inpoint: `${tx.txid}:${n}`,
-                });
-            }
-
-            // look for recieves in transaction outputs
-            for (let n = 0; n < tx.vout.length; n++) {
-                const vout = tx.vout[n];
-                const outpoint = `${tx.txid}:${n}`;
-
-                // if no addresses, skip
-                if (!vout.scriptPubKey.addresses) continue;
-
-                // iterate all addresses
-                for (const address of vout.scriptPubKey.addresses) {
-                    this.emit("receive", {
-                        address,
-                        outpoint,
-                    });
-                }
-            }
-        }
-
-        return true;
-    }
-}
 
 class WalletAccount {
     protected external: HdPrivateKey;
