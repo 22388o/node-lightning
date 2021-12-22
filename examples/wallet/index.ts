@@ -252,17 +252,17 @@ class WalletAccount {
         return address;
     }
 
-    public async recover2(filter: IBlockScanner) {
+    public async recover2(scanner: IBlockScanner) {
         const key = this.account.derive(0);
         const foundAddresses: Map<Address, { index: number; tx: Set<string> }> = new Map();
         const scanAddresses: Map<Address, number> = new Map();
         const outpoints: Map<OutPoint, InPoint> = new Map();
 
-        filter.on("start", () => {
+        scanner.on("start", () => {
             this._expandAddressWindow(key, foundAddresses, scanAddresses, 2000);
         });
 
-        filter.on("receive", (e: BlockScanReceiveEvent) => {
+        scanner.on("receive", (e: BlockScanReceiveEvent) => {
             const { address, outpoint } = e;
 
             if (!scanAddresses.has(address)) return true;
@@ -291,7 +291,7 @@ class WalletAccount {
             return foundAddresses.size < scanAddresses.size;
         });
 
-        filter.on("spend", (e: BlockScanSpendEvent) => {
+        scanner.on("spend", (e: BlockScanSpendEvent) => {
             const { outpoint, inpoint } = e;
 
             // not currently watching this outpoint
@@ -301,7 +301,7 @@ class WalletAccount {
             outpoints.set(outpoint, inpoint);
         });
 
-        filter.on("complete", () => {
+        scanner.on("complete", () => {
             console.log(foundAddresses);
             console.log(outpoints);
         });
