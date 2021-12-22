@@ -1,7 +1,7 @@
 import { Mnemonic, HdPrivateKey, Network } from "@node-lightning/bitcoin";
 import { BitcoindClient, BlockHeader, Transaction } from "@node-lightning/bitcoind";
 import { BitcoindBlockScanner } from "./BitcoindBlockScanner";
-import { BitcoindBip32NodeScanner } from "./BitcoindSingleScanner";
+import { BitcoindBip32NodeScanner } from "./BitcoindBip32NodeScanner";
 import { BlockScanReceiveEvent, BlockScanSpendEvent, IBlockScanner } from "./BlockScanner";
 
 const bitcoind = new BitcoindClient({
@@ -42,10 +42,10 @@ class Wallet {
         this.bip84Account = new WalletAccount(bip84AccountKey);
     }
 
-    public async recover2(bitcoind: BitcoindClient) {
+    public async recover(bitcoind: BitcoindClient) {
         const filter = new BitcoindBlockScanner(bitcoind);
-        this.bip32Account.recover2(filter);
-        this.bip84Account.recover2(filter);
+        this.bip32Account.recover(filter);
+        this.bip84Account.recover(filter);
 
         let bestHash = await bitcoind.getBestBlockHash();
         let bestHeader = await bitcoind.getHeader(bestHash);
@@ -121,7 +121,7 @@ class WalletAccount {
         return address;
     }
 
-    public async recover2(scanner: IBlockScanner) {
+    public async recover(scanner: IBlockScanner) {
         const key = this.account.derive(0);
         const foundAddresses: Map<Address, { index: number; tx: Set<string> }> = new Map();
         const scanAddresses: Map<Address, number> = new Map();
@@ -266,10 +266,10 @@ const wallet = new Wallet(seed, network, 0);
 // console.log(wallet.getP2wpkhAddress());
 // console.log(wallet.getP2wpkhAddress());
 
-const nodeScanner = new BitcoindBip32NodeScanner(bitcoind, wallet.bip84Account.account);
-nodeScanner.scan().catch(console.error);
+// const nodeScanner = new BitcoindBip32NodeScanner(bitcoind, wallet.bip84Account.account);
+// nodeScanner.scan().catch(console.error);
 
-// wallet.recover2(bitcoind).catch(console.error);
+wallet.recover(bitcoind).catch(console.error);
 
 // async function sync() {
 //     let height = 0;
