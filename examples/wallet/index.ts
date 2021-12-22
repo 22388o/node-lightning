@@ -42,10 +42,10 @@ class Wallet {
         this.bip84Account = new WalletAccount(bip84AccountKey);
     }
 
-    public async recover(bitcoind: BitcoindClient) {
+    public async recover(bitcoind: BitcoindClient, window: number = 2000) {
         const filter = new BitcoindBlockScanner(bitcoind);
-        this.bip32Account.recover(filter);
-        this.bip84Account.recover(filter);
+        this.bip32Account.recover(filter, window);
+        this.bip84Account.recover(filter, window);
 
         let bestHash = await bitcoind.getBestBlockHash();
         let bestHeader = await bitcoind.getHeader(bestHash);
@@ -53,13 +53,7 @@ class Wallet {
         let startHeight = 1;
         let endHeight = bestHeader.height;
 
-        let complete = false;
-        filter.on("complete", () => (complete = true));
-
-        while (!complete) {
-            startHeight = await filter.scan(startHeight, endHeight);
-            if (!startHeight) break;
-        }
+        await filter.scan(startHeight, endHeight);
     }
 
     public onBlockConnected(header: BlockHeader, txs: Transaction[]) {
@@ -121,20 +115,20 @@ class WalletAccount {
         return address;
     }
 
-    public async recover(scanner: IBlockScanner) {
+    public async recover(scanner: IBlockScanner, window: number) {
         const key = this.account.derive(0);
         const foundAddresses: Map<Address, { index: number; tx: Set<string> }> = new Map();
         const scanAddresses: Map<Address, number> = new Map();
         const outpoints: Map<OutPoint, InPoint> = new Map();
 
         scanner.on("start", () => {
-            this._expandAddressWindow(key, foundAddresses, scanAddresses, 2000);
+            this._expandAddressWindow(key, foundAddresses, scanAddresses, window);
         });
 
         scanner.on("receive", (e: BlockScanReceiveEvent) => {
             const { address, outpoint } = e;
 
-            if (!scanAddresses.has(address)) return true;
+            if (!scanAddresses.has(address)) return;
 
             if (!foundAddresses.has(address)) {
                 foundAddresses.set(address, {
@@ -149,7 +143,7 @@ class WalletAccount {
             // ignore if we previously processed this. This will
             // happen during a reprocessing of a block where we
             // need to expand the search parameters
-            if (record.tx.has(outpoint)) return true;
+            if (record.tx.has(outpoint)) return;
 
             // add the outpoint to the address
             record.tx.add(outpoint);
@@ -157,14 +151,18 @@ class WalletAccount {
             // add the outpoint as a watched outpoint
             outpoints.set(outpoint, null);
 
-            return foundAddresses.size < scanAddresses.size;
+            // if we have hit the scan range, then we need to cancel
+            // the current scan and retry the range
+            if (foundAddresses.size >= scanAddresses.size) {
+                scanner.cancel();
+            }
         });
 
         scanner.on("spend", (e: BlockScanSpendEvent) => {
             const { outpoint, inpoint } = e;
 
             // not currently watching this outpoint
-            if (!outpoints.has(outpoint)) return true;
+            if (!outpoints.has(outpoint)) return;
 
             // mark the watched outpoint as spent with this input
             outpoints.set(outpoint, inpoint);
@@ -269,7 +267,7 @@ const wallet = new Wallet(seed, network, 0);
 // const nodeScanner = new BitcoindBip32NodeScanner(bitcoind, wallet.bip84Account.account);
 // nodeScanner.scan().catch(console.error);
 
-wallet.recover(bitcoind).catch(console.error);
+wallet.recover(bitcoind, 2000).catch(console.error);
 
 // async function sync() {
 //     let height = 0;

@@ -6,7 +6,10 @@ type OutPoint = string;
 type InPoint = string;
 
 /**
- * Implements address scanning for a single BIP32 node by scanning all
+ * Implements address scanning for a single BIP32 node by scanning a
+ * range of derived addresses. This technique scans the blockchain for
+ * each supplied node, and as such is super efficient for BIP32 account
+ * discovery.
  */
 export class BitcoindBip32NodeScanner {
     constructor(readonly bitcoind: BitcoindClient, readonly node: HdPrivateKey) {}

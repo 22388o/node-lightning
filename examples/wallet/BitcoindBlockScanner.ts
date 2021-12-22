@@ -9,18 +9,15 @@ export class BitcoindBlockScanner extends BlockScanner {
         super();
     }
 
-    public async _scanRange(startHeight: number, endHeight: number): Promise<number> {
-        console.log("scanning", startHeight, endHeight);
+    public async _scanRange(startHeight: number, endHeight: number): Promise<void> {
         for (let height = startHeight; height <= endHeight; height++) {
-            this.emit("block", height);
+            this.lastBlock = height;
             const hash = await this.bitcoind.getBlockHash(height);
             const block = await this.bitcoind.getBlock(hash);
             const txs = block.tx;
 
             this._scanBlock(txs);
-            if (this.state === BlockScannerState.Canceled) {
-                return height;
-            }
+            if (this.state === BlockScannerState.Canceled) return;
         }
     }
 
